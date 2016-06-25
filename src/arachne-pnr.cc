@@ -131,7 +131,8 @@ main(int argc, const char **argv)
   bool help = false,
     quiet = false,
     do_promote_globals = true,
-    route_only = false,
+    route_ds = true,
+    place_ds = true,
     randomize_seed = false;
   std::string device = "1k";
   const char *chipdb_file = nullptr,
@@ -213,7 +214,9 @@ main(int argc, const char **argv)
               place_blif = argv[i];
             }
           else if (!strcmp(argv[i], "--route-only"))
-            route_only = true;
+            route_ds = false;
+          else if (!strcmp(argv[i], "--place-only"))
+            place_ds = false;
           else if (!strcmp(argv[i], "-p")
                    || !strcmp(argv[i], "--pcf-file"))
             {
@@ -465,8 +468,8 @@ main(int argc, const char **argv)
   
   {
     DesignState ds(chipdb, package, d);
-    
-    if (route_only)
+
+     if (!route_ds )
       {
         for (Instance *inst : ds.top->instances())
           {
@@ -477,7 +480,9 @@ main(int argc, const char **argv)
             extend(ds.placement, inst, cell);
           }
       }
-    else
+
+    
+    if (place_ds)
       {
         if (pcf_file)
           {
@@ -542,7 +547,7 @@ main(int argc, const char **argv)
 #ifndef NDEBUG
         d->check();
 #endif
-	
+  
         *logs << "place...\n";
         // d->dump();
         place(rg, ds);
@@ -604,11 +609,14 @@ main(int argc, const char **argv)
     
     // d->dump();
     
-    *logs << "route...\n";
-    route(ds, max_passes);
+    if (route_ds) 
+     {
+        *logs << "route...\n";
+        route(ds, max_passes);
 #ifndef NDEBUG
-    d->check();
+        d->check();
 #endif
+     }
     
     if (output_file)
       {
