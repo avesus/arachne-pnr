@@ -219,11 +219,22 @@ void
 Instance::merge_attrs(const Instance *inst)
 {
   auto i = inst->m_attrs.find("src");
+  // concatenate src 
   if (i != inst->m_attrs.end())
     {
       auto j = m_attrs.find("src");
       if (j != m_attrs.end())
         j->second = Const(j->second.as_string() + "|" + i->second.as_string());
+      else
+        m_attrs.insert(*i);
+    }
+  // make sure that location is the same
+  i = inst->m_attrs.find("loc");
+  if (i != inst->m_attrs.end()) 
+    {
+      auto j = m_attrs.find("loc");
+      if (j != m_attrs.end())
+        assert(i->second.as_string() == j->second.as_string());
       else
         m_attrs.insert(*i);
     }
