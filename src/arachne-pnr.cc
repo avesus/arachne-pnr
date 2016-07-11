@@ -87,6 +87,12 @@ usage()
     << "    --post-place-blif <file>\n"
     << "        Write post-place netlist to <file> as BLIF.\n"
     << "\n"
+    << "    --pack-only\n"
+    << "        Run pack.\n"
+    << "\n"
+    << "    --place-only\n"
+    << "        Run place.\n"
+    << "\n"
     << "    --route-only\n"
     << "        Input must include placement.\n"
     << "\n"
@@ -213,10 +219,14 @@ main(int argc, const char **argv)
               ++i;
               place_blif = argv[i];
             }
-          else if (!strcmp(argv[i], "--route-only"))
-            route_ds = false;
-          else if (!strcmp(argv[i], "--place-only"))
+          else if (!strcmp(argv[i], "--route-only")) {
+            route_ds = true;
             place_ds = false;
+          }
+          else if (!strcmp(argv[i], "--place-only")) {
+            route_ds = false;
+            place_ds = true;
+          }
           else if (!strcmp(argv[i], "-p")
                    || !strcmp(argv[i], "--pcf-file"))
             {
@@ -469,19 +479,6 @@ main(int argc, const char **argv)
   {
     DesignState ds(chipdb, package, d);
 
-     if (!route_ds )
-      {
-        for (Instance *inst : ds.top->instances())
-          {
-            const std::string &loc_attr = inst->get_attr("loc").as_string();
-            int cell;
-            if (sscanf(loc_attr.c_str(), "%d", &cell) != 1)
-              fatal("parse error in loc attribute");
-            extend(ds.placement, inst, cell);
-          }
-      }
-
-    
     if (place_ds)
       {
         if (pcf_file)
@@ -606,35 +603,50 @@ main(int argc, const char **argv)
             d->write_blif(fs);
           }
       }
+      else
+      {
+        // does this work? - seems like there are two formats for loc
+        for (Instance *inst : ds.top->instances())
+          {
+            const std::string &loc_attr = inst->get_attr("loc").as_string();
+            int x, y, z;
+            if (sscanf(loc_attr.c_str(), "%d,%d/%d", &x, &y, &z) != 3)
+                fatal("parse error in gate loc attribute");
+            assert( z < 8 );
+
+            Location loc(chipdb->tile(x, y), z);
+            int cell = chipdb->loc_cell(loc);
+            extend(ds.placement, inst, cell);
+          }
+      }
     
     // d->dump();
     
-    if (route_ds) 
-     {
+    if (route_ds) {
         *logs << "route...\n";
         route(ds, max_passes);
 #ifndef NDEBUG
         d->check();
 #endif
-     }
     
-    if (output_file)
-      {
-        *logs << "write_txt " << output_file << "...\n";
-        std::string expanded = expand_filename(output_file);
-        std::ofstream fs(expanded);
-        if (fs.fail())
-          fatal(fmt("write_txt: failed to open `" << expanded << "': "
+        if (output_file) {
+            *logs << "write_txt " << output_file << "...\n";
+            std::string expanded = expand_filename(output_file);
+            std::ofstream fs(expanded);
+            if (fs.fail())
+              fatal(fmt("write_txt: failed to open `" << expanded << "': "
                     << strerror(errno)));
-        ds.conf.write_txt(fs, chipdb, d, ds.placement, ds.cnet_net);
-      }
-    else
-      {
-        *logs << "write_txt <stdout>...\n";
-        ds.conf.write_txt(std::cout, chipdb, d, ds.placement, ds.cnet_net);
-      }
+            ds.conf.write_txt(fs, chipdb, d, ds.placement, ds.cnet_net);
+        }
+        else
+        {
+            *logs << "write_txt <stdout>...\n";
+            ds.conf.write_txt(std::cout, chipdb, d, ds.placement, ds.cnet_net);
+        }
   }
-  
+
+  }
+
   if (d)
     delete d;
   
