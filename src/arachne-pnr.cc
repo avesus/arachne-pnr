@@ -548,6 +548,10 @@ main(int argc, const char **argv)
         d->check();
 #endif
         // d->dump();
+
+        *logs << "place instances ...\n";
+        place_instances(ds, chipdb);
+        d->dump();
         
         *logs << "promote_globals...\n";
         promote_globals(ds, do_promote_globals);
@@ -562,10 +566,6 @@ main(int argc, const char **argv)
         d->check();
 #endif
 
-        *logs << "place instances ...\n";
-        place_instances(ds, chipdb);
-        // d->dump();
-  
         *logs << "place...\n";
         // d->dump();
         place(rg, ds);
