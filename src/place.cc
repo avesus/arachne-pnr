@@ -70,6 +70,8 @@ public:
   
   std::map<int, std::vector<int>> global_cells;
   
+  std::vector<std::vector<int>> cell_type_empty_cells;
+
   BasedBitVector<1> locked;
   BasedBitVector<1> chained;
   
@@ -85,11 +87,12 @@ public:
   BasedVector<int, 1> gate_chain;
   
   CellType gate_cell_type(int g);
+
   int gate_random_cell(int g);
-  std::pair<Location, bool> chain_random_loc(int c);
+  std::pair<Location, bool> chain_random_loc(unsigned c);
   
   void move_gate(int g, int cell);
-  void move_chain(int c, const Location &new_loc);
+  void move_chain(unsigned c, const Location &new_loc);
   
   int tile_n_pos(int t);
   
@@ -111,13 +114,13 @@ public:
   
   void save_set(int cell, int g);
   
-  void save_set_chain(int c, int x, int start);
+  void save_set_chain(int c, int x, int y);
   int save_recompute_wire_length();
   void restore();
   void discard();
   void accept_or_restore();
   
-  std::vector<int> chain_x, chain_start;
+  std::vector<int> chain_x, chain_y;
   
   BasedVector<int, 1> gate_cell;
   BasedVector<int, 1> cell_gate;
@@ -131,8 +134,20 @@ public:
   int wire_length() const;
   int compute_net_length(int w);
   unsigned top_port_io_gate(const std::string &net_name);
-  
+
+  bool free_tile(int x, int y);
+  bool free_tiles(int x, int y, int nt);
+  int find_free_tiles(int x, int nt);
+
+  int alloc_cell(CellType celltype, int gate);
+  int alloc_tiles(int nt);
+
+  void place_gate(int gate, int cell, bool chain, bool lock);
+
+  void place_chain(const std::vector<Instance*> &chain, int t, bool lock);
+
   void place_initial();
+
   void configure_io(const Location &loc,
                     bool enable_input,
                     bool pullup);
@@ -178,19 +193,19 @@ Placer::gate_random_cell(int g)
       int cell = gate_cell[g];
       int t = chipdb->cell_location[cell].tile();
       int x = chipdb->tile_x(t),
-        y = chipdb->tile_y(t);
+          y = chipdb->tile_y(t);
       
     L:
       int new_x = rg.random_int(std::max(0, x - diameter),
                                 std::min(chipdb->width-1, x + diameter)),
-        new_y = rg.random_int(std::max(0, y - diameter),
-                              std::min(chipdb->height-1, y + diameter));
+          new_y = rg.random_int(std::max(0, y - diameter),
+                                std::min(chipdb->height-1, y + diameter));
       int new_t = chipdb->tile(new_x, new_y);
       if (chipdb->tile_type[new_t] != TileType::LOGIC)
         goto L;
       
       Location loc(new_t, rg.random_int(0, 7));
-      return chipdb->loc_cell(loc);
+      return  chipdb->loc_cell(loc);
     }
   else
     {
@@ -200,79 +215,124 @@ Placer::gate_random_cell(int g)
 }
 
 std::pair<Location, bool>
-Placer::chain_random_loc(int c)
+Placer::chain_random_loc(unsigned c)
 {
-  const auto &v = chains.chains[c];
-  int nt = (v.size() + 7) / 8;
+  int nt = (chains.chains[c].size() + 7) / 8;
   
   int new_x = random_element(logic_columns, rg);
-  int new_start = random_int(1, chipdb->height - 2 - (nt - 1), rg);
-  int new_end = new_start + nt - 1;
-  
+  int new_y = random_int(1, chipdb->height - 2 - (nt - 1), rg);
+  int new_y_end = new_y + nt;
+
+  // check that the new loc doesn't overlap any chains
   for (unsigned e = 0; e < chains.chains.size(); ++e)
     {
       if (chain_x[e] != new_x)  // including self
         continue;
       
       int e_nt = (chains.chains[e].size() + 7) / 8;
-      int e_start = chain_start[e],
-        e_end = e_start + e_nt - 1;
-      if ((new_start > e_start && new_start <= e_end)
-          || (new_end >= e_start && new_end < e_end))
+      int e_y = chain_y[e];
+      int e_y_end = e_y + e_nt;
+
+      // if the new position overlaps a chain, return false?
+      //   not exactly sure of the logic here ...
+      if ((new_y     > e_y && new_y     < e_y_end)
+       || (new_y_end > e_y && new_y_end < e_y_end))
         return std::make_pair(Location(), false);
     }
   
-  int t = chipdb->tile(new_x, new_start);
-  return std::make_pair(Location(t, 0), true);
+  // check that the new loc doesn't overlap any locked gates
+  for( int y = new_y; y < new_y_end; y++ ) {
+      int t = chipdb->tile(new_x, y);
+      for( int z = 0; z < 8; z++ ) {
+          Location loc(t,z);
+          int cell = chipdb->loc_cell(loc); 
+          int gate = cell_gate[cell];
+          if( gate and locked[gate] ) 
+              return std::make_pair(Location(), false);
+      }
+  }
+  
+  Location loc( chipdb->tile(new_x, new_y), 0 );
+  return std::make_pair(loc, true);
 }
 
 void
-Placer::move_gate(int g, int new_cell)
+Placer::move_gate(int gate, int new_cell)
 {
-  assert(g);
-  if (locked[g])
+  assert(gate);
+  if (locked[gate])
     move_failed = true;
   
-  int cell = gate_cell[g]; // copy
+  int cell = gate_cell[gate]; // copy
   if (new_cell == cell)
     return;
   
-  int new_g = cell_gate[new_cell];
-  if (new_g && locked[new_g])
+  int new_gate = cell_gate[new_cell];
+  if (new_gate && locked[new_gate])
     move_failed = true;
   
-  save_set(new_cell, g);
-  save_set(cell, new_g);
+  save_set(new_cell, gate);
+  save_set(cell, new_gate);
+
+#if 0
+  Location loc = chipdb->cell_location[cell];
+  int t = loc.tile();
+  int x = chipdb->tile_x(t), 
+      y = chipdb->tile_y(t),
+      z = loc.pos();
+
+  *logs << "moving gate from ";
+  *logs << cell << "(" << x << "," << y << "," << z << ")";
+  loc = chipdb->cell_location[new_cell];
+  t = loc.tile();
+  x = chipdb->tile_x(t), 
+  y = chipdb->tile_y(t),
+  z = loc.pos();
+  *logs << " to " << new_cell << "(" << x << "," << y << "," << z << ")\n";
+#endif
 }
 
 void
-Placer::move_chain(int c, const Location &new_base)
+Placer::move_chain(unsigned c, const Location &new_base)
 {
   assert(new_base.pos() == 0);
+
+  /*
+  int gate = cell_gate[chipdb->loc_cell(loc)];
+  if( locked[gate] )
+        return std::make_pair(Location(), false);
+  */
   
   int nt = (chains.chains[c].size() + 7) / 8;
   
-  int x = chain_x[c],
-    start = chain_start[c];
+  int x = chain_x[c];
+  int y = chain_y[c];
   
   int new_t = new_base.tile();
   int new_x = chipdb->tile_x(new_t),
-    new_start = chipdb->tile_y(new_t);
-  if (new_x == x
-      && new_start == start)
+      new_y = chipdb->tile_y(new_t);
+  if (new_x == x && new_y == y)
     return;
+
+#if 0
+  *logs << "moving chain from ";
+  *logs << "(" << x << "," << y << ") to ";
+  *logs << "(" << new_x << "," << new_y << ")\n";
+#endif
   
   for (int i = 0; i < nt; ++i)
     for (unsigned k = 0; k < 8; ++k)
       {
-        Location loc(chipdb->tile(x, start + i), k),
-          new_loc(chipdb->tile(new_x, new_start + i), k);
+        Location loc(chipdb->tile(x, y + i), k),
+          new_loc(chipdb->tile(new_x, new_y + i), k);
         
         int cell = chipdb->loc_cell(loc),
           new_cell = chipdb->loc_cell(new_loc);
         
         unsigned g = cell_gate[cell],
           new_g = cell_gate[new_cell];
+        //*logs << "moving gate " << g << " to " << new_cell << "\n";
+        //*logs << "moving gate " << new_g << " to " << cell << "\n";
         if (g)
           move_gate(g, new_cell);
         if (new_g)
@@ -300,6 +360,7 @@ Placer::tile_n_pos(int t)
 void
 Placer::save_set(int cell, int g)
 {
+  //*logs << "save_set " << cell << " " << g << "\n";
   const Location &loc = chipdb->cell_location[cell];
   int t = loc.tile();
   
@@ -311,6 +372,7 @@ Placer::save_set(int cell, int g)
       gate_cell[g] = cell;
       
       int c = gate_chain[g];
+      //*logs << "chain " << g << " " << c << "\n";
       if (c != -1)
         {
           int x = chipdb->tile_x(t),
@@ -327,11 +389,12 @@ Placer::save_set(int cell, int g)
 }
 
 void
-Placer::save_set_chain(int c, int x, int start)
+Placer::save_set_chain(int c, int x, int y)
 {
-  restore_chain.push_back(std::make_tuple(c, chain_x[c], chain_start[c]));
+  restore_chain.push_back(std::make_tuple(c, chain_x[c], chain_y[c]));
+  //*logs << "chain_x " << x << "; chain_y " << y << "\n";
   chain_x[c] = x;
-  chain_start[c] = start;
+  chain_y[c] = y;
 }
 
 int
@@ -364,10 +427,10 @@ Placer::restore()
     net_length[p.first] = p.second;
   for (const auto &t : restore_chain)
     {
-      int e, x, start;
-      std::tie(e, x, start) = t;
+      int e, x, y;
+      std::tie(e, x, y) = t;
       chain_x[e] = x;
-      chain_start[e] = start;
+      chain_y[e] = y;
     }
 }
 
@@ -384,12 +447,10 @@ Placer::discard()
 bool
 Placer::inst_drives_global(Instance *inst, int c, int glb)
 {
-#ifndef NDEBUG
   Location loc = chipdb->cell_location[c];
   int t = loc.tile();
   int x = chipdb->tile_x(t),
     y = chipdb->tile_y(t);
-#endif
   if (models.is_gb_io(inst)
       && inst->find_port("GLOBAL_BUFFER_OUTPUT")->connected())
     {
@@ -455,26 +516,23 @@ bool
 Placer::valid(int t)
 {
   int x = chipdb->tile_x(t),
-    y = chipdb->tile_y(t);
-  if (chipdb->tile_type[t] == TileType::LOGIC)
-    {
+      y = chipdb->tile_y(t);
+  if (chipdb->tile_type[t] == TileType::LOGIC) {
       int global_clk = 0,
-        global_sr = 0,
-        global_cen = 0;
+          global_sr = 0,
+          global_cen = 0;
       int neg_clk = -1;
       tmp_local_np.clear();
-      for (int q = 0; q < 8; q ++)
-        {
+      for (int q = 0; q < 8; q ++) {
           Location loc(t, q);
           int cell = chipdb->loc_cell(loc);
           int g = cell_gate[cell];
-          if (g)
-            {
+          if (g) {
               Instance *inst = gates[g];
               
               int clk = gate_clk[g],
-                sr = gate_sr[g],
-                cen = gate_cen[g];
+                   sr = gate_sr[g],
+                  cen = gate_cen[g];
               
               if (!global_clk)
                 global_clk = clk;
@@ -520,8 +578,7 @@ Placer::valid(int t)
       int b = chipdb->tile_bank(t);
       
       int latch = 0;
-      for (int cell : chipdb->bank_cells[b])
-        {
+      for (int cell : chipdb->bank_cells[b]) {
           int g = cell_gate[cell];
           if (g)
             {
@@ -698,6 +755,7 @@ Placer::accept_or_restore()
           // std::cout << "delta " << delta << "\n";
           improved = true;
         }
+      //*logs << "move accepted: wire length " << wire_length() << "\n";
       ++n_accept;
     }
   else
@@ -728,6 +786,7 @@ Placer::top_port_io_gate(const std::string &net_name)
 void
 Placer::check()
 {
+  // for (int g = 1; g <= n_gates; ++g)
   for (Instance *inst : top->instances())
     {
       int g = gate_idx.at(inst);
@@ -746,7 +805,7 @@ Placer::check()
       for (unsigned i = 0; i < v.size(); ++i)
         {
           Location loc (chipdb->tile(chain_x[c],
-                                     chain_start[c] + i / 8),
+                                     chain_y[c] + i / 8),
                         i % 8);
           int g = gate_idx.at(v[i]);
           int cell = chipdb->loc_cell(loc);
@@ -755,8 +814,8 @@ Placer::check()
         }
       
       int nt = (v.size() + 7) / 8;
-      int start = chain_start[c];
-      assert(start + nt - 1 <= chipdb->height - 2);
+      int y = chain_y[c];
+      assert(y + nt - 1 <= chipdb->height - 2);
     }
   for (int w = 1; w < (int)nets.size(); ++w) // skip 0, nullptr
     assert(net_length[w] == compute_net_length(w));
@@ -829,6 +888,7 @@ Placer::Placer(random_generator &rg_, DesignState &ds_)
     changed_tiles(chipdb->n_tiles),
     cell_gate(chipdb->n_cells, 0)
 {
+
   for (const auto &p : chipdb->loc_pin_glb_num)
     {
       const Location &loc = p.first;
@@ -839,7 +899,7 @@ Placer::Placer(random_generator &rg_, DesignState &ds_)
   for (const auto &p : chipdb->gbufin)
     {
       int x = p.first.first,
-        y = p.first.second;
+          y = p.first.second;
       int glb = p.second;
       int t = chipdb->tile(x, y);
       Location loc(t, 2);
@@ -882,15 +942,18 @@ Placer::Placer(random_generator &rg_, DesignState &ds_)
         }
     }
   
+  // initialize list of columns containing logic cells
   for (int i = 0; i < chipdb->width; ++i)
     {
       int t = chipdb->tile(i, 1);
       if (chipdb->tile_type[t] == TileType::LOGIC)
         logic_columns.push_back(i);
     }
+
+  // initialize tile lists of different types
   for (int i = 0; i < chipdb->n_tiles; ++i)
     {
-      switch(chipdb->tile_type[i])
+        switch(chipdb->tile_type[i])
         {
         case TileType::LOGIC:
           logic_tiles.push_back(i);
@@ -902,6 +965,7 @@ Placer::Placer(random_generator &rg_, DesignState &ds_)
           break;
         }
     }
+
 
   std::tie(nets, net_idx) = top->index_nets();
   int n_nets = nets.size();
@@ -968,204 +1032,264 @@ Placer::Placer(random_generator &rg_, DesignState &ds_)
             net_global[net_idx.at(n)] = true;
         }
     }
+
+}
+
+/*
+ * alloc unused cell from list of empty cells
+ */
+int 
+Placer::alloc_cell(CellType celltype, int gate)
+{
+    int ct_idx = cell_type_idx(celltype);
+    auto &v = cell_type_empty_cells[ct_idx];
+          
+    for (int j = 0; j < (int)v.size(); ++j) {
+        int cell = v[j];
+              
+        // should not have been used
+        assert(cell_gate[cell] == 0);
+
+        // check whether this gate can be placed on this cell
+        cell_gate[cell] = gate; //gate_cell[gate] = cell;
+        if( valid(chipdb->cell_location[cell].tile())) {
+            cell_gate[cell] = 0;
+            pop(v, j); // remove from empty list
+            return cell;
+        }
+        cell_gate[cell] = 0; //gate_cell[gate] = 0;
+    }
+    fatal(fmt("failed to place: placed " << cell_type_name(celltype)));
+    return 0;
+}
+
+/*
+ * return true if all the cells in this tile are unused
+ */
+bool 
+Placer::free_tile(int x, int y)
+{
+    for( int z = 0; z < 8; z++ ) {
+        Location loc(chipdb->tile(x, y), z);
+        if( cell_gate[chipdb->loc_cell(loc)] != 0)
+             return false;
+    }
+    return true;
+}
+
+/*
+ * return true if nt tiles starting at x, y are unused
+ */
+bool 
+Placer::free_tiles(int x, int y, int nt)
+{
+    int y_end = y + nt;
+    while( y < y_end ) {
+        if( !free_tile(x, y) )
+            return false;
+        y++;
+    }
+    return true;
+}
+
+/*
+ * find first block of nt free tiles starting y in column x
+ */
+int
+Placer::find_free_tiles(int x, int nt)
+{
+    for( int y = 1; y < chipdb->height - 1; y++ )
+        if( free_tiles( x, y, nt ) )
+            return y;
+    return 0;
+}
+
+/*
+ * alloc nt unused tiles
+ */
+int 
+Placer::alloc_tiles(int nt)
+{
+    int x = 0;
+    int y = 0;
+    for (unsigned k = 0; k < logic_columns.size(); ++k) {
+        x = logic_columns[k];
+        y = find_free_tiles(x, nt);
+        if( y != 0 )
+            break;
+    }
+    assert( y != 0 );
+    *logs << "found tile at " << x << "," << y <<"\n";
+    return chipdb->tile(x, y);
+}
+
+/*
+ * place gate at cell
+ *  set chained and locked for that gate
+ */
+void
+Placer::place_gate(int gate, int cell, bool chain, bool lock)
+{
+#if 0
+    Location loc = chipdb->cell_location[cell];
+    int t = loc.tile();
+    int x = chipdb->tile_x(t),
+        y = chipdb->tile_y(t),
+        z = loc.pos();
+
+    *logs << "placing ";
+    if( lock ) 
+        *logs << "locked ";
+    if( chain )
+        *logs << "chained ";
+    *logs << "gate " << gate << " at cell " << cell << " (" << x << "," << y << "," << z << ")\n";
+#endif
+
+    // assert that this cell is unused
+    assert(cell_gate[cell] == 0);
+
+    cell_gate[cell] = gate;
+    gate_cell[gate] = cell;
+
+    chained[gate] = chain;
+    locked[gate] = lock;
+
+    assert(valid(chipdb->cell_location[cell].tile()));
+}
+
+void
+Placer::place_chain(const std::vector<Instance*> &v, int t, bool lock)
+{
+    int x = chipdb->tile_x(t);
+    int y = chipdb->tile_y(t);
+    for (unsigned j = 0; j < v.size(); ++j) {
+        Location loc(chipdb->tile(x, y + j / 8), j % 8);
+        int cell = chipdb->loc_cell(loc);
+        place_gate(gate_idx.at(v[j]), cell,  true, lock);
+    }
+
+    // save location of chain
+    chain_x.push_back(x);
+    chain_y.push_back(y);
+#if 0
+    *logs << "placing ";
+    if( lock ) 
+        *logs << "locked ";
+    *logs << "chain " << " at tile " << t << "(" << x << "," << y << ")\n";
+#endif
 }
 
 void
 Placer::place_initial()
 {
-  locked.resize(n_gates);
-  chained.resize(n_gates);
-  
-  // place chains
-  std::vector<int> logic_column_free(logic_columns.size(), 1);
-  std::vector<int> logic_column_last(logic_columns.size(),
-                                     chipdb->height - 2);
-  
-  // FIXME apply only if present
-  for (unsigned i = 0; i < logic_column_free.size(); ++i)
-    {
-      if (chipdb->device == "1k"
-          && (logic_columns[i] == 1
-              || logic_columns[i] == 12))
-        logic_column_free[i] = 2;
-      else if (chipdb->device == "8k"
-               && (logic_columns[i] == 1
-                   || logic_columns[i] == 32))
-        {
-          logic_column_free[i] = 2;
-          logic_column_last[i] = 31;
-        }
+    locked.resize(n_gates);
+    chained.resize(n_gates);
+
+    // count number of gates of each cell type
+    std::vector<int> cell_type_n_gates(n_cell_types, 0);
+    for (int g = 1; g <= n_gates; ++g)
+        ++cell_type_n_gates[cell_type_idx(gate_cell_type(g))];
+
+    // count of the number of cells placed
+    std::vector<int> cell_type_n_placed(n_cell_types, 0);
+
+    *logs << "placing gates in placement list\n";
+    for (const auto &p : placement) {
+        Instance *inst = p.first;
+        int gate = gate_idx.at(inst);
+        int cell = p.second;
+      
+        place_gate(gate, cell, false, true);
+      
+        ++cell_type_n_placed[cell_type_idx(gate_cell_type(gate))];
+    }
+
+    *logs << "placing chains ... \n"; 
+    for (unsigned i = 0; i < chains.chains.size(); ++i) {
+        const auto &v = chains.chains[i];
+      
+        CellType ct = gate_cell_type(gate_idx.at(v[0]));
+        if ((ct != CellType::LOGIC) || (v[0]->has_attr("loc")))
+            continue;
+
+        int gate0 = gate_idx.at(v[0]);
+        if( gate_cell[gate0] != 0 ) // already placed
+            continue;
+
+        // assert that no other chain begins here
+        assert(gate_chain[gate0] == -1);
+        gate_chain[gate0] = i;
+
+        int nt = (v.size() + 7) / 8;
+        int t = alloc_tiles(nt);
+
+        place_chain(v, t, false);
+
+        cell_type_n_placed[cell_type_idx(ct)] += v.size();
     }
   
-  for (unsigned i = 0; i < chains.chains.size(); ++i)
-    {
-      const auto &v = chains.chains[i];
-      
-      int gate0 = gate_idx.at(v[0]);
-      assert(gate_chain[gate0] == -1);
-      gate_chain[gate0] = i;
-      
-      int nt = (v.size() + 7) / 8;
-      for (unsigned k = 0; k < logic_columns.size(); ++k)
-        {
-          if (logic_column_free[k] + nt - 1 <= logic_column_last[k])
-            {
-              int x = logic_columns[k];
-              int y = logic_column_free[k];
-              
-              for (unsigned j = 0; j < v.size(); ++j)
-                {
-                  Instance *inst = v[j];
-                  int g = gate_idx.at(inst);
-                  Location loc(chipdb->tile(x, y + j / 8),
-                               j % 8);
-                  int cell = chipdb->loc_cell(loc);
-                  
-                  assert(cell_gate[cell] == 0);
-                  cell_gate[cell] = g;
-                  gate_cell[g] = cell;
-                  chained[g] = true;
-                }
-              
-              chain_x.push_back(x);
-              chain_start.push_back(y);
-              
-              logic_column_free[k] += nt;
-              goto placed_chain;
-            }
-        }
-      fatal(fmt("failed to place: placed " 
-                << i
-                << " of " << chains.chains.size()
-                << " carry chains"));
-      
-    placed_chain:;
-    }
-  
-  std::vector<int> cell_type_n_placed(n_cell_types, 0);
-  
-  for (const auto &p : placement)
-    {
-      Instance *inst = p.first;
-      int g = gate_idx.at(inst);
-      int c = p.second;
-      
-      assert(cell_gate[c] == 0);
-      cell_gate[c] = g;
-      gate_cell[g] = c;
-      
-      locked[g] = true;
-      
-      CellType ct = gate_cell_type(g);
-      int ct_idx = cell_type_idx(ct);
-      ++cell_type_n_placed[ct_idx];
-      
-      assert(valid(chipdb->cell_location[c].tile()));
-    }
-  
-  std::vector<std::vector<int>> cell_type_empty_cells = chipdb->cell_type_cells;
-  for (int i = 0; i < n_cell_types; ++i)
-    for (int j = 0; j < (int)cell_type_empty_cells[i].size();)
-      {
-        int c = cell_type_empty_cells[i][j];
-        if (cell_gate[c] != 0)
-          pop(cell_type_empty_cells[i], j);
-        else
-          ++j;
+    // initialize empty cell lists to all chipdb cells
+    cell_type_empty_cells = chipdb->cell_type_cells;
+
+    // remove cells from the empty cell lists if they been assigned 
+    for (int i = 0; i < n_cell_types; ++i)
+        for (int j = 0; j < (int)cell_type_empty_cells[i].size();) {
+            int c = cell_type_empty_cells[i][j];
+            // if the cell has been placed, remove it from the empty cell list
+            if (cell_gate[c] != 0)
+                pop(cell_type_empty_cells[i], j);
+            else
+                ++j;
       }
   
-  std::vector<int> cell_type_n_gates(n_cell_types, 0);
-  for (int i = 1; i <= n_gates; ++i)
-    ++cell_type_n_gates[cell_type_idx(gate_cell_type(i))];
-  
-  std::set<std::pair<uint8_t, int>> io_q;
-  
-  for (int i = 1; i <= n_gates; ++i)
-    {
-      if (locked[i] 
-          || chained[i])
-        continue;
+    *logs << "placing cells ...\n"; // (except GB and WARMBOOT)
+    for (int g = 1; g <= n_gates; ++g) {
+        CellType celltype = gate_cell_type(g);
+        if ((celltype == CellType::WARMBOOT) || (celltype == CellType::GB))
+            continue;
+        if( gate_cell[g] != 0 ) // placed
+            continue;
+        assert(!locked[g]);
+        assert(!chained[g]);
       
-      free_gates.push_back(i);
-      CellType ct = gate_cell_type(i);
-      if (ct == CellType::GB)
-        {
-          Instance *inst = gates[i];
-          io_q.insert(std::make_pair(lookup_or_default(gb_inst_gc, inst, gc_clk), i));
-        }
-      else
-        {
-          int ct_idx = cell_type_idx(ct);
-          auto &v = cell_type_empty_cells[ct_idx];
-          
-          for (int j = 0; j < (int)v.size(); ++j)
-            {
-              int c = v[j];
-              
-              assert(cell_gate[c] == 0);
-              cell_gate[c] = i;
-              gate_cell[i] = c;
-              
-              if (ct != CellType::WARMBOOT &&
-                  !valid(chipdb->cell_location[c].tile()))
-                cell_gate[c] = 0;
-              else
-                {
-                  ++cell_type_n_placed[ct_idx];
-                  pop(v, j);
-                  goto placed_gate;
-                }
-            }
-          
-          fatal(fmt("failed to place: placed "
-                    << cell_type_n_placed[ct_idx]
-                    << " " << cell_type_name(ct) << "s of " << cell_type_n_gates[ct_idx]
-                    << " / " << chipdb->cell_type_cells[ct_idx].size()));
-        placed_gate:;
-        }
+        // free_gates are gates that can be moved during the place process
+        free_gates.push_back(g);
+
+        int c = alloc_cell(celltype, g);
+
+        place_gate(g, c, false, false);
+
+        ++cell_type_n_placed[cell_type_idx(celltype)];
     }
-  
-  // place gb
-  int gb_idx = cell_type_idx(CellType::GB);
-  while (!io_q.empty())
-    {
-      std::pair<uint8_t, int> p = *io_q.begin();
-      io_q.erase(io_q.begin());
+
+    // this seems weird
+    *logs << "placing GB\n"; // (except WARMBOOT)
+    for (int g = 1; g <= n_gates; ++g) {
+        CellType celltype = gate_cell_type(g);
+        if ((celltype == CellType::WARMBOOT) || (celltype != CellType::GB))
+            continue;
+        if( gate_cell[g] != 0 ) // placed
+            continue;
+        assert(!locked[g]);
+        assert(!chained[g]);
       
-      int i = p.second;
-      auto &v = cell_type_empty_cells[gb_idx];
-      
-      for (unsigned j = 0; j < v.size(); ++j)
-        {
-          int c = v[j];
-          
-          assert(cell_gate[c] == 0);
-          cell_gate[c] = i;
-          gate_cell[i] = c;
-          
-          if (!valid(chipdb->cell_location[c].tile()))
-            cell_gate[c] = 0;
-          else
-            {
-              ++cell_type_n_placed[gb_idx];
-              pop(v, j);
-              goto placed_gb;
-            }
-        }
-      fatal(fmt("failed to place: placed "
-                << cell_type_n_placed[gb_idx]
-                << " GBs of " << cell_type_n_gates[gb_idx]
-                << " / " << chipdb->cell_type_cells[gb_idx].size()));
-    placed_gb:;
+        // free_gates are gates that can be moved during the place process
+        free_gates.push_back(g);
+
+        int c = alloc_cell(celltype, g);
+
+        place_gate(g, c, false, false);
+
+        ++cell_type_n_placed[cell_type_idx(celltype)];
     }
-  
-  for (int g = 1; g <= n_gates; ++g)
-    {
-      Instance *inst = gates[g];
-      for (const auto &p : inst->ports())
-        {
-          Net *n = p.second->connection();
-          if (n
+
+    // net stuff
+
+    for (int g = 1; g <= n_gates; ++g) {
+        Instance *inst = gates[g];
+        for (const auto &p : inst->ports()) {
+            Net *n = p.second->connection();
+            if (n
               && !n->is_constant())  // constants are not routed
             {
               int w = net_idx.at(n);
@@ -1175,8 +1299,8 @@ Placer::place_initial()
         }
     }
   
-  for (int w = 0; w < (int)nets.size(); ++w)
-    net_length[w] = compute_net_length(w);
+    for (int w = 0; w < (int)nets.size(); ++w)
+        net_length[w] = compute_net_length(w);
 }
 
 void
@@ -1235,15 +1359,23 @@ Placer::configure()
     {
       Instance *inst = gates[g];
       int cell = gate_cell[g];
-      
+
       const Location &loc = chipdb->cell_location[cell];
+      int t = loc.tile();
+      
+      /*
+      int x = chipdb->tile_x(t),
+          y = chipdb->tile_y(t),
+          z = loc.pos();
+      *logs << "gate " << g << " at cell " << cell << " (" << x << "," << y << "," << z << ")\n";
+      */
+      
       
       if (models.is_warmboot(inst)) {
         placement[inst] = cell;
         continue;
       }
 
-      int t = loc.tile();
       const auto &func_cbits = chipdb->tile_nonrouting_cbits.at(chipdb->tile_type[t]);
       
       if (models.is_lc(inst))
@@ -1403,9 +1535,6 @@ Placer::configure()
                 }
             }
           assert(found);
-
-	  // avoid "variable ‘found’ set but not used" in NDEBUG builds
-	  if (found) { }
           
           const CBit &cbit_pt0 = func_cbits.at(fmt("IOB_" << io_loc.pos() << ".PINTYPE_0"))[0],
             &cbit_pt1 = func_cbits.at(fmt("IOB_" << io_loc.pos() << ".PINTYPE_1"))[0];
@@ -1620,7 +1749,7 @@ Placer::configure()
   // set IoCtrl configuration bits
   {
     const auto &func_cbits = chipdb->tile_nonrouting_cbits.at(TileType::IO);
-    const CBit &lvds_cbit = func_cbits.at("IoCtrl.LVDS")[0];
+    const CBit &lvds = func_cbits.at("IoCtrl.LVDS")[0];
     
     std::map<Location, int> loc_pll;
     int pll_idx = cell_type_idx(CellType::PLL);
@@ -1635,37 +1764,11 @@ Placer::configure()
         extend(loc_pll, b_loc, cell);
       }
     
-    std::set<Location> ieren_partner_image;
-    for (const auto &p : package.pin_loc)
-      {
-        bool is_lvds = false;
-        const Location &loc = p.second;
-        int pll_cell = lookup_or_default(loc_pll, loc, 0);
-
-        if (!pll_cell)
-          {
-            int cell = chipdb->loc_cell(loc);
-            int g = cell_gate[cell];
-            if (g)
-              {
-                Instance *inst = gates[g];
-                is_lvds = inst->get_param("IO_STANDARD").as_string() == "SB_LVDS_INPUT";
-              }
-          }
-
-        if (is_lvds)
-          {
-            Location partner_loc(loc.tile(), !loc.pos());
-            extend(ieren_partner_image, partner_loc);
-          }
-      }
-
     for (const auto &p : package.pin_loc)
       {
         // unused io
         bool enable_input = false;
         bool pullup = true;  // default pullup
-        bool is_lvds = false;
         
         const Location &loc = p.second;
         int pll_cell = lookup_or_default(loc_pll, loc, 0);
@@ -1689,29 +1792,15 @@ Placer::configure()
                         && inst->find_port("GLOBAL_BUFFER_OUTPUT")->connected()))
                   enable_input = true;
                 pullup = inst->get_param("PULLUP").get_bit(0);
-                is_lvds = inst->get_param("IO_STANDARD").as_string() == "SB_LVDS_INPUT";
-                conf.set_cbit(CBit(loc.tile(), lvds_cbit.row, lvds_cbit.col), is_lvds);
+                conf.set_cbit(CBit(loc.tile(),
+                                   lvds.row,
+                                   lvds.col),
+                              inst->get_param("IO_STANDARD").as_string() == "SB_LVDS_INPUT");
               }
           }
-
-        if (contains(ieren_partner_image, loc))
-          continue;
         
-        if (is_lvds)
-          {
-            enable_input = false;
-            pullup = false;
-          }
-
         const Location &ieren_loc = chipdb->ieren.at(loc);
         configure_io(ieren_loc, enable_input, pullup);
-
-        if (is_lvds)
-          {
-            Location partner_loc(loc.tile(), !loc.pos());
-            const Location &partner_ieren_loc = chipdb->ieren.at(partner_loc);
-            configure_io(partner_ieren_loc, enable_input, pullup);
-          }
       }
     
     std::set<Location> ieren_image;
@@ -1764,6 +1853,7 @@ Placer::place()
   place_initial();
   // check();
   
+  *logs << "annealing\n";
   *logs << "  initial wire length = " << wire_length() << "\n";
   
   int n_no_progress = 0;
@@ -1782,10 +1872,8 @@ Placer::place()
           for (int g : free_gates)
             {
               int new_cell = gate_random_cell(g);             
-              
-              int new_g = cell_gate[new_cell];
-              if (new_g 
-                  && chained[new_g])
+              int new_gate = cell_gate[new_cell];
+              if (new_gate && chained[new_gate])
                 continue;
               
               assert(!move_failed);
@@ -1795,15 +1883,19 @@ Placer::place()
               // check();
             }
           
-          for (int c = 0; c < (int)chains.chains.size(); ++c)
+          for (unsigned c = 0; c < chains.chains.size(); ++c)
             {
+              int gate0 = gate_idx.at(chains.chains[c][0]);
+              if( locked[gate0] )
+                  continue;
+
               std::pair<Location, bool> new_loc = chain_random_loc(c);
-              if (new_loc.second)
-                {
-                  assert(!move_failed);
-                  move_chain(c, new_loc.first);
-                  accept_or_restore();
-                }
+              if (!new_loc.second)
+                  continue;
+
+              assert(!move_failed);
+              move_chain(c, new_loc.first);
+              accept_or_restore();
               
               // check();
             }
@@ -1827,8 +1919,7 @@ Placer::place()
                 << ", diameter = " << diameter
                 << ", temp " << temp << "\n";
 #endif
-      
-      int M = std::max(chipdb->width,
+           int M = std::max(chipdb->width,
                        chipdb->height);
 
       double upper = 0.6,
@@ -1861,7 +1952,7 @@ Placer::place()
               else
                 temp *= 0.8;
             }
-        }
+        } 
     }
   
   *logs << "  final wire length = " << wire_length() << "\n";

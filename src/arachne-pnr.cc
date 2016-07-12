@@ -129,6 +129,24 @@ struct null_ostream : public std::ostream
   null_ostream() : std::ostream(0) {}
 };
 
+void
+place_instances(DesignState &ds, const ChipDB *chipdb)
+{
+    for (Instance *inst : ds.top->instances()) {
+        if (inst->has_attr("loc")) {
+            const std::string &loc_attr = inst->get_attr("loc").as_string();
+            int x, y, z;
+            if (sscanf(loc_attr.c_str(), "%d,%d/%d", &x, &y, &z) != 3)
+                fatal("parse error in gate loc attribute");
+            assert( z < 8 );
+
+            Location loc(chipdb->tile(x, y), z);
+            int cell = chipdb->loc_cell(loc);
+            extend(ds.placement, inst, cell);
+        }
+    }
+}
+
 int
 main(int argc, const char **argv)
 {
@@ -493,7 +511,7 @@ main(int argc, const char **argv)
         d->check();
 #endif
         // d->dump();
-        
+
         *logs << "pack...\n";
         pack(ds);
 #ifndef NDEBUG
@@ -529,7 +547,6 @@ main(int argc, const char **argv)
 #ifndef NDEBUG
         d->check();
 #endif
-        
         // d->dump();
         
         *logs << "promote_globals...\n";
@@ -544,6 +561,10 @@ main(int argc, const char **argv)
 #ifndef NDEBUG
         d->check();
 #endif
+
+        *logs << "place instances ...\n";
+        place_instances(ds, chipdb);
+        // d->dump();
   
         *logs << "place...\n";
         // d->dump();
@@ -603,21 +624,8 @@ main(int argc, const char **argv)
             d->write_blif(fs);
           }
       }
-      else
-      {
-        // does this work? - seems like there are two formats for loc
-        for (Instance *inst : ds.top->instances())
-          {
-            const std::string &loc_attr = inst->get_attr("loc").as_string();
-            int x, y, z;
-            if (sscanf(loc_attr.c_str(), "%d,%d/%d", &x, &y, &z) != 3)
-                fatal("parse error in gate loc attribute");
-            assert( z < 8 );
-
-            Location loc(chipdb->tile(x, y), z);
-            int cell = chipdb->loc_cell(loc);
-            extend(ds.placement, inst, cell);
-          }
+      else {
+        place_instances(ds, chipdb);
       }
     
     // d->dump();
