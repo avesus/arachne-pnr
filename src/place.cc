@@ -1146,18 +1146,18 @@ void
 Placer::place_gate(int gate, int cell, bool chain, bool lock)
 {
 #if 0
+    *logs << "placing gate " << gate << " cell " << cell << "\n";;
+    if( lock ) 
+        *logs << "locked ";
+    if( chain )
+        *logs << "chained ";
     Location loc = chipdb->cell_location[cell];
     int t = loc.tile();
     int x = chipdb->tile_x(t),
         y = chipdb->tile_y(t),
         z = loc.pos();
 
-    *logs << "placing ";
-    if( lock ) 
-        *logs << "locked ";
-    if( chain )
-        *logs << "chained ";
-    *logs << "gate " << gate << " at cell " << cell << " (" << x << "," << y << "," << z << ")\n";
+    *logs << " (" << x << "," << y << "," << z << ")\n";
 #endif
 
     // assert that this cell is unused

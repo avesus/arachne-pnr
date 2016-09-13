@@ -136,11 +136,15 @@ place_instances(DesignState &ds, const ChipDB *chipdb)
         if (inst->has_attr("loc")) {
             const std::string &loc_attr = inst->get_attr("loc").as_string();
             int x, y, z;
-            if (sscanf(loc_attr.c_str(), "%d,%d/%d", &x, &y, &z) != 3)
-                fatal("parse error in gate loc attribute");
-            assert( z < 8 );
+            if (sscanf(loc_attr.c_str(), "%d,%d/%d", &x, &y, &z) == 3) {
+              assert( z < 8 );
+              // other tile types can have z ...
+              assert(chipdb->tile_type[chipdb->tile(x,y)] == TileType::LOGIC);
+            }
+            else
+              fatal("parse error in gate loc attribute");
 
-            Location loc(chipdb->tile(x, y), z);
+            Location loc(chipdb->tile(x,y), z);
             int cell = chipdb->loc_cell(loc);
             extend(ds.placement, inst, cell);
         }
